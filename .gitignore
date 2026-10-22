@@ -40,6 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Local order database and setup template
+# Local runtime data and environment template
 /.data/
 !.env.example

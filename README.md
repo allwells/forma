@@ -4,7 +4,7 @@ A small art storefront with Airbenda airtime payments, built with Next.js, React
 
 ## Local setup
 
-Use **Node.js 22.13 or newer** (the order store uses built-in `node:sqlite`) and Bun to manage packages.
+Use **Node.js 22.13 or newer** and Bun to manage packages.
 
 ```sh
 bun install
@@ -22,12 +22,12 @@ bun run build
 bun run start
 ```
 
-Tests replace the gateway network boundary with fixtures and use temporary SQLite databases. They never create live Airbenda payments. Never use real customer information in tests.
+Tests replace the gateway network boundary with fixtures. They never create live Airbenda payments. Never use real customer information in tests.
 
 ## Checkout flow
 
 1. The shop validates product IDs, integer quantities, Nigerian phone numbers, network and delivery details on its server. Prices come from the hardcoded catalogue, never from submitted totals.
-2. A pending order and its item/price snapshot are committed to SQLite before calling `POST /api/checkout/initialize`. The returned Airbenda transaction ID, reference and opaque session token are saved against that order.
+2. A pending order and its item/price snapshot are saved before calling `POST /api/checkout/initialize`. The returned Airbenda transaction ID, reference and opaque session token are saved against that order.
 3. The customer sees Airbenda's exact airtime amount, receiving number, transfer instructions, charges, expiry and any partial balance. Supported deployed networks are MTN, Airtel, 9Mobile and T2 Mobile. Bank app / VTU means buying airtime for the receiving number, not sending money to a bank account.
 4. The shop checks `GET /api/checkout/{tx_id}`. Reporting a transfer is not proof of payment. Success requires a verified matching transaction, order amount, network, method, component totals and fully received funds.
 5. Only confirmed payment removes purchased quantities from the bag. A single persisted cart record tracks processed order IDs so refreshing the receipt does not remove items again. Changes added to the bag after an order was created remain in the bag.
@@ -49,13 +49,11 @@ The intended public domain is `https://formalabs.vercel.app`. Configure the exis
 
 Both routes return to checkout, which loads the saved order and verifies its payment status. Visiting a success URL cannot mark an order paid, and a cancel return never clears the bag.
 
-**Vercel deployment is not ready with the current local SQLite adapter.** Vercel functions require a shared durable database for order and session mappings. Configure a shared database adapter before deploying payment acceptance; the local filesystem must not be used for production orders.
-
 Use the same merchant's webhook signing secret in `AIRBENDA_WEBHOOK_SECRET`. The route verifies a hex HMAC-SHA256 of the exact raw request body against `x-airbenda-signature`, then re-reads the saved transaction from Airbenda. It handles both typed event envelopes and legacy transaction bodies. Duplicate or out-of-order events cannot create orders or fulfill them twice. A webhook arriving before transaction mapping completes is harmless; browser polling also reconciles the order. Transient verification failures return 503 so Airbenda can retry.
 
 Localhost is not reachable by Airbenda's webhook sender. Deploy the shop to a public HTTPS URL before configuring Merchant webhooks. Browser polling works while the checkout page remains open. No webhook settings are changed by this repository.
 
-**Storage:** the default database is `.data/orders.sqlite`, with restrictive file permissions and WAL journalling. This is suitable for local development or a single Node server with a private persistent volume. Set `SHOP_DATABASE_PATH` to that volume's absolute database path in production. Keep database backups and the SQLite WAL files together; the database contains customer delivery/contact data and payment access tokens. Do not host this storage on an ephemeral/serverless filesystem or run independent replicas with separate databases. A shared database adapter is needed for that deployment model. Node must have network access to `https://api.airbenda.com`.
+The shop server needs network access to `https://api.airbenda.com`.
 
 ## Recovery and production prerequisites
 
