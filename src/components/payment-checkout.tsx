@@ -88,7 +88,9 @@ export function PaymentCheckout({
         ← Back to the collection
       </Link>
       <span className="eyebrow">
-        {paid ? "PAYMENT CONFIRMED BY AIRBENDA" : "YOUR ORDER IS SAVED"}
+        {paid
+          ? "PAYMENT CONFIRMED BY AIRBENDA"
+          : "YOUR CHECKOUT IS SAVED IN THIS BROWSER"}
       </span>
       <h1>{headings[order.status]}</h1>
       <p className="checkout-intro">

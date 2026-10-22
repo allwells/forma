@@ -40,6 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Local runtime data and environment template
-/.data/
+# Environment template
 !.env.example

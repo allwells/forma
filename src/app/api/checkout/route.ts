@@ -5,9 +5,11 @@ import {
   currentOrder,
   refreshOrder,
 } from "@/lib/server/checkout-service";
-import { publicOrder } from "@/lib/server/order-store";
+import { publicOrder } from "@/lib/server/checkout-record";
 import {
   checkoutSession,
+  checkoutRecord,
+  saveCheckoutRecord,
   newCheckoutSession,
   jsonResponse,
   requireBrowserSession,
@@ -20,16 +22,17 @@ export async function GET(request: NextRequest) {
   try {
     const existing = checkoutSession(request),
       session = existing || newCheckoutSession();
-    let order = currentOrder(session),
+    let order = currentOrder(checkoutRecord(request, session)),
       warning: string | null = null;
-    if (order && order.status === "pending") {
+    if (order?.payment) {
       try {
         order = await refreshOrder(order);
       } catch {
         warning =
-          "We couldn’t update your payment status. Your order is saved; please check again.";
+          "We couldn’t update payment status. Keep this checkout open and check again.";
       }
     }
+    // Reads do not rewrite the order cookie, so a slow poll cannot overwrite a newer payment response.
     return jsonResponse(
       {
         configured: paymentConfig().configured,
@@ -52,19 +55,20 @@ export async function POST(request: NextRequest) {
         503,
       );
     const body = await limitedJson(request);
+    let order;
     try {
-      return jsonResponse({
-        order: publicOrder(await createOrder(session, body)),
-      });
+      order = createOrder(checkoutRecord(request, session), body);
     } catch (error) {
-      if (
-        !(error instanceof PaymentError) &&
-        error instanceof Error &&
-        /Please|Choose|Your bag/.test(error.message)
-      )
+      if (error instanceof Error && !(error instanceof PaymentError))
         throw new PaymentError(error.message, 400);
       throw error;
     }
+    // Save the draft in the browser before the separate payment initialization request.
+    return saveCheckoutRecord(
+      jsonResponse({ order: publicOrder(order) }),
+      order,
+      session,
+    );
   } catch (error) {
     return errorResponse(error);
   }

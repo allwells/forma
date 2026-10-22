@@ -13,7 +13,7 @@ export function Checkout() {
   const [delivery, setDelivery] = useState(0);
   const [order, setOrder] = useState<PublicOrder | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [configured, setConfigured] = useState(false);
+  const [configured, setConfigured] = useState<boolean | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const locked = useRef(false);
@@ -76,32 +76,64 @@ export function Checkout() {
     locked.current = true;
     setSubmitting(true);
     setError("");
+    const input = {
+      items: cart,
+      delivery: delivery === 10 ? "express" : "standard",
+      network: data.get("network"),
+      channel: data.get("channel"),
+      customer: Object.fromEntries(
+        ["name", "email", "phone", "address", "city", "state"].map((key) => [
+          key,
+          data.get(key),
+        ]),
+      ),
+    };
     try {
-      const response = await fetch("/api/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: cart,
-          delivery: delivery === 10 ? "express" : "standard",
-          network: data.get("network"),
-          channel: data.get("channel"),
-          customer: Object.fromEntries(
-            ["name", "email", "phone", "address", "city", "state"].map(
-              (key) => [key, data.get(key)],
-            ),
-          ),
-        }),
-      });
-      const result = await response.json();
-      if (!response.ok)
-        throw new Error(
-          result.error ||
-            "We couldn’t start payment. Please check your saved order.",
-        );
-      setOrder(result.order);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      const begin = async () => {
+        // Re-read the browser's shared checkout under a cross-tab lock before starting another attempt.
+        const existingResponse = await fetch("/api/checkout", {
+          cache: "no-store",
+        });
+        const existing = await existingResponse.json();
+        if (!existingResponse.ok)
+          throw new Error(
+            existing.error || "We couldn’t load checkout. Please try again.",
+          );
+        if (existing.order) {
+          setOrder(existing.order);
+          return;
+        }
+        const response = await fetch("/api/checkout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const draft = await response.json();
+        if (!response.ok)
+          throw new Error(draft.error || "We couldn’t prepare this checkout.");
+        setOrder(draft.order);
+        if (draft.order.status === "creating" && !draft.order.payment) {
+          // The encrypted draft cookie has arrived before any gateway request is made.
+          const paymentResponse = await fetch("/api/checkout/action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "initialize", input }),
+          });
+          const payment = await paymentResponse.json();
+          if (!paymentResponse.ok)
+            throw new Error(
+              payment.error ||
+                "We couldn’t confirm the payment response. Please check before starting again.",
+            );
+          setOrder(payment.order);
+        }
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      if (navigator.locks)
+        await navigator.locks.request("forma-checkout-payment", begin);
+      else await begin();
     } catch (error) {
-      // The server may have saved an order even if the response was lost.
+      // Recover the saved browser checkout without retrying payment initialization.
       await loadCheckout().catch(() => {});
       setError(
         error instanceof Error
@@ -151,7 +183,7 @@ export function Checkout() {
       <p className="checkout-intro">
         A few details, and your little collection is complete.
       </p>
-      {!configured && (
+      {configured === false && (
         <div className="demo-notice setup-notice" role="status">
           <Icon name="bag" />
           <p>

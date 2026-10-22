@@ -1,74 +1,110 @@
-import { createHash } from "node:crypto";
 import {
   parseGatewayPayment,
   paymentOrderStatus,
   parseOrderInput,
 } from "../payments.ts";
 import { gatewayRequest, initializePayment, PaymentError } from "./airbenda.ts";
-import { getOrderStore, type StoredOrder } from "./order-store.ts";
+import {
+  createCheckoutRecord,
+  type CheckoutRecord,
+} from "./checkout-record.ts";
 
-export const sessionHash = (session: string) =>
-  createHash("sha256").update(session).digest("hex");
-export function currentOrder(session: string) {
-  const store = getOrderStore();
-  const order = store.current(sessionHash(session));
+export function currentOrder(record: CheckoutRecord | null) {
   if (
-    order?.status === "creating" &&
-    Date.now() - Date.parse(order.createdAt) > 45000
+    record?.status === "creating" &&
+    Date.now() - Date.parse(record.createdAt) > 45000
   )
-    return store.update(order.id, { status: "uncertain" });
-  return order;
+    return { ...record, status: "uncertain" as const };
+  return record;
 }
-export async function refreshOrder(order: StoredOrder, force = false) {
-  if (!order.payment || !order.sessionToken) return order;
-  if (!force && Date.now() - Date.parse(order.updatedAt) < 4000) return order;
+export async function refreshOrder(order: CheckoutRecord) {
+  if (!order.payment || !order.sessionToken) return currentOrder(order)!;
   const query = new URLSearchParams({ session_token: order.sessionToken });
   const value = await gatewayRequest(
     `/api/checkout/${encodeURIComponent(order.payment.id)}?${query}`,
   );
-  let payment;
   try {
-    payment = parseGatewayPayment(value, order, order.payment.id);
+    const payment = parseGatewayPayment(value, order, order.payment.id);
+    return {
+      ...order,
+      payment,
+      status: paymentOrderStatus(payment),
+      updatedAt: new Date().toISOString(),
+    };
   } catch {
     throw new PaymentError(
-      "We couldn’t verify the latest payment status. Your order is still saved; please check again.",
+      "We couldn’t verify the latest payment status. Keep this checkout open and check again.",
     );
   }
-  return getOrderStore().savePayment(
-    order.id,
-    payment,
-    paymentOrderStatus(payment),
-  );
 }
-export async function createOrder(session: string, body: unknown) {
-  const store = getOrderStore();
-  const input = parseOrderInput(body);
-  const { order, created } = store.claim(sessionHash(session), input);
-  if (!created) return order;
+export function createOrder(
+  record: CheckoutRecord | null,
+  body: unknown,
+): CheckoutRecord {
+  if (record) return currentOrder(record)!;
+  return createCheckoutRecord(parseOrderInput(body));
+}
+export async function startPayment(
+  order: CheckoutRecord,
+  body: unknown,
+): Promise<CheckoutRecord> {
+  if (order.payment || order.status !== "creating") return currentOrder(order)!;
+  if (Date.now() - Date.parse(order.createdAt) > 45000)
+    return { ...order, status: "uncertain" };
+  let input;
+  try {
+    input = parseOrderInput(body);
+  } catch (error) {
+    throw new PaymentError(
+      error instanceof Error
+        ? error.message
+        : "Please check your checkout details.",
+      400,
+    );
+  }
+  if (
+    input.totalKobo !== order.totalKobo ||
+    input.network !== order.network ||
+    input.channel !== order.channel ||
+    input.deliveryKobo !== order.deliveryKobo ||
+    JSON.stringify(input.items) !== JSON.stringify(order.items)
+  )
+    throw new PaymentError(
+      "Your bag changed. Please reload your saved checkout.",
+      409,
+    );
   try {
     const { payment, token } = await initializePayment(input);
-    return store.savePayment(
-      order.id,
+    return {
+      ...order,
       payment,
-      paymentOrderStatus(payment),
-      token,
-    );
+      sessionToken: token,
+      status: paymentOrderStatus(payment),
+      updatedAt: new Date().toISOString(),
+    };
   } catch (error) {
-    store.update(order.id, {
-      status:
-        error instanceof PaymentError && !error.uncertain
-          ? "failed"
-          : "uncertain",
-    });
-    throw error;
+    if (error instanceof PaymentError && !error.uncertain)
+      return {
+        ...order,
+        status: "failed",
+        updatedAt: new Date().toISOString(),
+      };
+    return {
+      ...order,
+      status: "uncertain",
+      updatedAt: new Date().toISOString(),
+    };
   }
 }
-export async function orderAction(session: string, action: string) {
-  const store = getOrderStore();
-  let order = currentOrder(session);
-  if (!order) throw new PaymentError("No saved order was found.", 404);
+export async function orderAction(
+  record: CheckoutRecord | null,
+  action: string,
+): Promise<CheckoutRecord | null> {
+  let order = currentOrder(record);
+  if (!order)
+    throw new PaymentError("No saved order was found in this browser.", 404);
   if (action === "new-order") {
-    if (order.payment) order = await refreshOrder(order, true);
+    if (order.payment) order = await refreshOrder(order);
     if (
       ["creating", "pending", "uncertain"].includes(order.status) ||
       (order.payment &&
@@ -79,15 +115,14 @@ export async function orderAction(session: string, action: string) {
         "This payment needs to be resolved before starting another order.",
         409,
       );
-    store.update(order.id, { archived: true });
     return null;
   }
-  if (action === "refresh") return refreshOrder(order, true);
+  if (action === "refresh") return refreshOrder(order);
   if (!["cancel", "report-paid"].includes(action))
     throw new PaymentError("Unknown payment action.", 400);
   if (!order.payment || !order.sessionToken)
     throw new PaymentError("The payment isn’t ready for this action.", 409);
-  order = await refreshOrder(order, true);
+  order = await refreshOrder(order);
   if (order.status !== "pending") return order;
   if (action === "cancel" && order.payment!.receivedKobo > 0)
     throw new PaymentError(
@@ -99,5 +134,5 @@ export async function orderAction(session: string, action: string) {
     `/api/checkout/${encodeURIComponent(order.payment!.id)}/${action}?${query}`,
     {},
   );
-  return refreshOrder(order, true);
+  return refreshOrder(order);
 }

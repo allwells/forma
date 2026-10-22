@@ -4,8 +4,6 @@ import {
   validWebhookSignature,
   PaymentError,
 } from "@/lib/server/airbenda";
-import { getOrderStore } from "@/lib/server/order-store";
-import { refreshOrder } from "@/lib/server/checkout-service";
 import { limitedBody, jsonResponse, errorResponse } from "@/lib/server/http";
 export const runtime = "nodejs";
 export async function POST(request: NextRequest) {
@@ -32,15 +30,8 @@ export async function POST(request: NextRequest) {
     const id = data?.transaction_id ?? data?._id ?? data?.id;
     if (typeof id !== "string" || !/^[a-f0-9]{24}$/i.test(id))
       throw new PaymentError("Missing transaction identity.", 400);
-    const order = getOrderStore().byGateway(id);
-    // Out-of-order events and retries are safe: only Airbenda's current status can update the order.
-    if (order) {
-      try {
-        await refreshOrder(order, true);
-      } catch {
-        throw new PaymentError("Please retry this notification.", 503);
-      }
-    }
+    // Acknowledge signed notifications. Browser checkout reads the authoritative status from Airbenda.
+    // No customer order history or fulfillment database is maintained by this demo shop.
     return jsonResponse({ received: true });
   } catch (error) {
     return errorResponse(error);

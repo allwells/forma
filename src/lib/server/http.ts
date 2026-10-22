@@ -1,8 +1,41 @@
 import { randomBytes } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { PaymentError } from "./airbenda.ts";
+import { PaymentError, paymentConfig } from "./airbenda.ts";
+import {
+  openCheckoutRecord,
+  sealCheckoutRecord,
+  type CheckoutRecord,
+} from "./checkout-record.ts";
 
 const COOKIE = "forma-checkout-session";
+const ORDER_COOKIE = "forma-checkout-order-v1";
+export function checkoutRecord(
+  request: NextRequest,
+  session: string,
+): CheckoutRecord | null {
+  return openCheckoutRecord(
+    request.cookies.get(ORDER_COOKIE)?.value,
+    session,
+    paymentConfig().webhookSecret || "",
+  );
+}
+export function saveCheckoutRecord(
+  response: NextResponse,
+  record: CheckoutRecord | null,
+  session: string,
+) {
+  const value = record
+    ? sealCheckoutRecord(record, session, paymentConfig().webhookSecret || "")
+    : "";
+  response.cookies.set(ORDER_COOKIE, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/checkout",
+    maxAge: record ? 60 * 60 * 24 * 7 : 0,
+  });
+  return response;
+}
 export function checkoutSession(request: NextRequest) {
   const value = request.cookies.get(COOKIE)?.value;
   return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
@@ -71,7 +104,7 @@ export function errorResponse(error: unknown) {
       error:
         error instanceof PaymentError
           ? error.message
-          : "We couldn’t complete this request. Your saved order is safe; please check again.",
+          : "We couldn’t load checkout. Please refresh this page and try again.",
     },
     error instanceof PaymentError ? error.status : 500,
   );

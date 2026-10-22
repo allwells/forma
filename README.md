@@ -1,77 +1,57 @@
 # Forma art shop
 
-A small art storefront with Airbenda airtime payments, built with Next.js, React, and TypeScript. All integration code lives in `airbenda/shop`; Merchant, Checkout, and the Airbenda backend do not need feature changes.
+A small art storefront with Airbenda airtime checkout, built with Next.js, React and TypeScript. Products are a hardcoded list in `src/lib/shop.ts`: ten artworks priced between ₦30 and ₦50.
 
-## Local setup
+## Setup
 
-Use **Node.js 22.13 or newer** and Bun to manage packages.
+Use Node.js 22 or newer and Bun to manage packages.
 
 ```sh
 bun install
 cp .env.example .env.local
-# Set the merchant public key and webhook signing secret in .env.local.
 bun run dev
 ```
 
-Open http://localhost:3003. Never prefix payment credentials with `NEXT_PUBLIC_`. Both key and signing secret are required; missing configuration disables payment creation. `.env.local` and `.data/` are ignored by Git. Use one shop merchant account so its confirmation and partial-payment webhooks point to this shop.
+Set `AIRBENDA_PUBLIC_KEY` and `AIRBENDA_WEBHOOK_SECRET` in `.env.local` for local development and in the Vercel project's environment variables for deployment. `AIRBENDA_API_BASE_URL` defaults to `https://api.airbenda.com`. Credentials stay on the server and must never use a `NEXT_PUBLIC_` prefix. The development server uses http://localhost:3003.
 
-```sh
-bun run typecheck
-bun run test
-bun run build
-bun run start
-```
+## Products and checkout state
 
-Tests replace the gateway network boundary with fixtures. They never create live Airbenda payments. Never use real customer information in tests.
+There is no shop database and no runtime filesystem writing. Vercel functions do not provide durable writable JSON files, so the deployed app reads its product catalogue from the `.ts` file.
 
-## Checkout flow
+The cart is saved as JSON in the browser's localStorage. The current checkout is a JSON record encrypted with AES-256-GCM in an HttpOnly, SameSite cookie bound to that browser's checkout session. It expires after seven days. It holds the server-priced item snapshot, order reference and Airbenda transaction credentials. Contact and delivery details are not retained by the shop; customer name, email and payer number are submitted to Airbenda when initializing payment.
 
-1. The shop validates product IDs, integer quantities, Nigerian phone numbers, network and delivery details on its server. Prices come from the hardcoded catalogue, never from submitted totals.
-2. A pending order and its item/price snapshot are saved before calling `POST /api/checkout/initialize`. The returned Airbenda transaction ID, reference and opaque session token are saved against that order.
-3. The customer sees Airbenda's exact airtime amount, receiving number, transfer instructions, charges, expiry and any partial balance. Supported deployed networks are MTN, Airtel, 9Mobile and T2 Mobile. Bank app / VTU means buying airtime for the receiving number, not sending money to a bank account.
-4. The shop checks `GET /api/checkout/{tx_id}`. Reporting a transfer is not proof of payment. Success requires a verified matching transaction, order amount, network, method, component totals and fully received funds.
-5. Only confirmed payment removes purchased quantities from the bag. A single persisted cart record tracks processed order IDs so refreshing the receipt does not remove items again. Changes added to the bag after an order was created remain in the bag.
+A draft cookie is saved before the separate request that initializes payment. The browser serializes checkout submissions across tabs using Web Locks when supported. Known transactions are reused, and uncertain initialization attempts are not automatically retried. Without gateway idempotency or central storage, the demo cannot guarantee exactly-once initialization across all concurrent clients. Clearing cookies or rotating the signing secret loses the browser's current checkout. Airbenda retains the payment record; the shop does not maintain a separate order history or shipping/fulfillment database.
 
-An HttpOnly, SameSite cookie scopes access to the current order. Customer contact and delivery information and gateway session tokens stay server-side. Mutating checkout requests require a matching Origin and JSON content type. Public order responses omit contact information and access tokens. API responses are not cached.
+Only Airbenda's verified current status can confirm payment. The shop validates the transaction ID, network, method, order amount, component totals and received balance. Reporting a transfer does not confirm payment. Partial payments prevent cancellation or replacement. Confirmed payment removes purchased quantities from the browser cart once, preserving later additions.
 
-## Webhooks and deployment
+## Merchant settings
 
-Set both **Confirmation URL** and **Partial payment alert** in the existing Airbenda Merchant settings to:
+Production domain: `https://formalabs.vercel.app`.
 
-```text
-https://formalabs.vercel.app/api/airbenda/webhook
-```
+- Success redirect: `https://formalabs.vercel.app/checkout/success`
+- Cancel redirect: `https://formalabs.vercel.app/checkout/cancel`
+- Confirmation webhook: `https://formalabs.vercel.app/api/airbenda/webhook`
+- Partial-payment webhook: `https://formalabs.vercel.app/api/airbenda/webhook`
 
-The intended public domain is `https://formalabs.vercel.app`. Configure the existing Merchant checkout redirects as:
+The redirect routes reopen the saved browser checkout and check payment status. Visiting a success URL cannot mark an order paid.
 
-- Success: `https://formalabs.vercel.app/checkout/success`
-- Cancel: `https://formalabs.vercel.app/checkout/cancel`
+The webhook route verifies the HMAC-SHA256 signature over the raw body and acknowledges valid notifications. It does not keep a separate event/order store or trigger fulfillment. Browser polling and explicit status refresh read the authoritative transaction from Airbenda, including after returning to checkout. No Merchant settings are changed automatically.
 
-Both routes return to checkout, which loads the saved order and verifies its payment status. Visiting a success URL cannot mark an order paid, and a cancel return never clears the bag.
+## Scope
 
-Use the same merchant's webhook signing secret in `AIRBENDA_WEBHOOK_SECRET`. The route verifies a hex HMAC-SHA256 of the exact raw request body against `x-airbenda-signature`, then re-reads the saved transaction from Airbenda. It handles both typed event envelopes and legacy transaction bodies. Duplicate or out-of-order events cannot create orders or fulfill them twice. A webhook arriving before transaction mapping completes is harmless; browser polling also reconciles the order. Transient verification failures return 503 so Airbenda can retry.
+Supported deployed networks are MTN, Airtel, 9Mobile and T2 Mobile. Bank app / VTU means buying airtime for the receiving number, not making a bank transfer. Airbenda supplies the exact airtime total, charges, receiving number, expiry and any partial balance.
 
-Localhost is not reachable by Airbenda's webhook sender. Deploy the shop to a public HTTPS URL before configuring Merchant webhooks. Browser polling works while the checkout page remains open. No webhook settings are changed by this repository.
-
-The shop server needs network access to `https://api.airbenda.com`.
-
-## Recovery and production prerequisites
-
-- Duplicate submissions from the same checkout session reuse the saved attempt. An initialization timeout, unknown gateway response or server restart during initialization becomes **uncertain**; it is never automatically retried. Resolve it with Airbenda using the shop reference and merchant transaction records before manually retiring it. There is deliberately no browser button that discards an uncertain attempt.
-- Pending orders and partially received airtime cannot be replaced. Cancellation is refused after any funds arrive. An expired/failed order with partial funds directs the customer to support. Always check payment status before creating a replacement.
-- Webhooks trigger canonical API verification, and stale pending responses cannot undo an already verified paid/refunded state. No fulfillment/email/shipping automation is implemented. If adding those later, use a durable idempotent fulfillment job keyed by the order ID.
-- The inspected Airbenda deployment publishes manual approval/rejection endpoints without authentication requirements in its schema. Resolve that backend security issue before accepting real payments. This shop integration does not change those backend handlers.
-- Actual ₦30–₦50 acceptance, current merchant/network rates, receiving-SIM availability, real settlement and outbound signed webhook delivery still require a controlled integration test. The shop displays returned charges rather than hardcoding a fee estimate.
+Artwork, artist credits, delivery estimates and inventory are sample content. This app does not send order emails or arrange shipping. Payment uses the configured Airbenda account. The previously inspected Airbenda manual-approval endpoints need authentication hardening before real-money use.
 
 ## Main files
 
-- `src/lib/shop.ts`: ten hardcoded ₦30–₦50 artworks and cart rules.
-- `src/lib/payments.ts`: server input validation and gateway monetary checks.
-- `src/lib/server/order-store.ts`: durable order snapshots and state updates.
-- `src/lib/server/checkout-service.ts`: creation, polling, reporting and cancellation.
-- `src/lib/server/airbenda.ts`: server-only gateway calls and signature verification.
-- `src/app/api/checkout/`: private shop checkout endpoints.
-- `src/app/api/airbenda/webhook/route.ts`: signed payment notification receiver.
-- `src/components/payment-checkout.tsx`: instructions, partial-payment and confirmation screens.
+- `src/lib/shop.ts`: product list and cart rules.
+- `src/lib/payments.ts`: checkout input and gateway amount validation.
+- `src/lib/server/checkout-record.ts`: encrypted browser checkout record.
+- `src/lib/server/checkout-service.ts`: payment creation, status, reporting and cancellation.
+- `src/lib/server/airbenda.ts`: server-only gateway calls and webhook signatures.
+- `src/app/api/checkout/`: checkout endpoints.
+- `src/app/api/airbenda/webhook/route.ts`: signed notification receiver.
+- `src/components/payment-checkout.tsx`: payment instructions and confirmation UI.
 
-The artwork, artist credits, products and delivery estimates remain sample content. Payment uses the configured Airbenda account; it is not a simulated gateway.
+Existing automated checks are retained in `tests/`. They use mocked gateway responses and encrypted checkout records. Tests, builds and UI checks are left to the user when requested.
