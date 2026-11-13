@@ -30,6 +30,7 @@ export function gatewayFixture(overrides: Record<string, unknown> = {}) {
     id: "0123456789abcdef01234567",
     reference: "chk_fixture",
     status: "pending",
+    is_demo: true,
     session_token: "opaque_fixture_token_123456789",
     expected_amount_kobo: 10000,
     airtime_amount_kobo: 11400,
@@ -157,4 +158,24 @@ test("only paid orders remove purchased quantities, once, while keeping later ad
     { productId: "wild-stems", quantity: 1 },
   ]);
   assert.equal(completePaidCart(next, paid), next);
+});
+
+test("top-up instructions accept only a code for the exact balance and receiving number", () => {
+  const input = parseOrderInput(checkoutInput);
+  const partial = gatewayFixture({ status: "partial", received_amount_kobo: 6000, remaining_amount_kobo: 6400 });
+  assert.equal(parseGatewayPayment(partial, input).ussd, null);
+  const code = "*321*1*08012345678*64*PIN#";
+  assert.equal(parseGatewayPayment({ ...partial, topup_ussd_code: code }, input).ussd, code);
+  assert.equal(parseGatewayPayment({ ...partial, topup_ussd_code: "*321*1*08012345679*64*PIN#" }, input).ussd, null);
+});
+
+test("receipt link is displayed only for confirmed payment on the configured gateway", () => {
+  const input = parseOrderInput(checkoutInput);
+  const origin = "https://api.airbenda.com";
+  const id = String(gatewayFixture().id);
+  const url = `${origin}/api/checkout/${id}/receipt`;
+  assert.equal(parseGatewayPayment(gatewayFixture({ receipt_url: url }), input, id, origin).receiptUrl, null);
+  const paid = gatewayFixture({ status: "success", is_demo: false, received_amount_kobo: 12400, remaining_amount_kobo: 0 });
+  assert.equal(parseGatewayPayment({ ...paid, receipt_url: url }, input, id, origin).receiptUrl, url);
+  assert.equal(parseGatewayPayment({ ...paid, receipt_url: url.replace(origin, "https://other.example") }, input, id, origin).receiptUrl, null);
 });

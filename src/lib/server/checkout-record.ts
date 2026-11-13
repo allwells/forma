@@ -67,7 +67,9 @@ export function sealCheckoutRecord(
   const plain = JSON.stringify({
     version: 1,
     expires: Date.parse(record.createdAt) + LIFETIME_MS,
-    order: record,
+    order: record.payment
+      ? { ...record, payment: { ...record.payment, receiptEmail: undefined } }
+      : record,
   });
   const encrypted = Buffer.concat([
     cipher.update(plain, "utf8"),

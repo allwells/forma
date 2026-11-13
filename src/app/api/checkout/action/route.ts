@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     const order =
       body.action === "initialize"
         ? await startPayment(previous!, body.input)
-        : await orderAction(previous, body.action);
+        : await orderAction(previous, body.action, body.senderPhone);
     return saveCheckoutRecord(
       jsonResponse({ order: order ? publicOrder(order) : null }),
       order,

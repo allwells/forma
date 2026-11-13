@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatKobo, type PublicOrder } from "@/lib/payments";
 import { products } from "@/lib/shop";
 import { Artwork } from "./artwork";
@@ -11,13 +11,19 @@ export function PaymentCheckout({
   error,
   onError,
   onOrder,
+  onActing,
+  statusUnavailable,
 }: {
   order: PublicOrder;
   error: string;
   onError: (error: string) => void;
   onOrder: (order: PublicOrder | null) => void;
+  onActing: (pending: boolean) => void;
+  statusUnavailable: boolean;
 }) {
   const [busy, setBusy] = useState("");
+  const inFlight = useRef(false);
+  const [senderPhone, setSenderPhone] = useState("");
   const [notice, setNotice] = useState("");
   const [seconds, setSeconds] = useState(0);
   const payment = order.payment;
@@ -34,7 +40,9 @@ export function PaymentCheckout({
     return () => clearInterval(timer);
   }, [payment?.expiresAt, payment?.serverTime]);
   async function action(name: string) {
-    if (busy) return;
+    if (inFlight.current) return;
+    inFlight.current = true;
+    onActing(true);
     setBusy(name);
     onError("");
     setNotice("");
@@ -42,7 +50,7 @@ export function PaymentCheckout({
       const response = await fetch("/api/checkout/action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: name }),
+        body: JSON.stringify({ action: name, ...(name === "report-paid" && senderPhone.trim() ? { senderPhone } : {}) }),
       });
       const data = await response.json();
       if (!response.ok)
@@ -50,9 +58,9 @@ export function PaymentCheckout({
           data.error || "We couldn’t update this payment. Please check again.",
         );
       onOrder(data.order);
-      if (name === "report-paid" && data.order?.status === "pending")
+      if (name === "report-paid" && ["pending", "verifying"].includes(data.order?.status))
         setNotice(
-          "Transfer reported. Airbenda is checking for your airtime; this is not yet a payment confirmation.",
+          "Transfer reported. Airbenda is checking for your airtime.",
         );
     } catch (error) {
       onError(
@@ -61,10 +69,14 @@ export function PaymentCheckout({
           : "We couldn’t update payment. Please check again.",
       );
     } finally {
+      inFlight.current = false;
+      onActing(false);
       setBusy("");
     }
   }
-  const paid = order.status === "paid";
+  const paid = order.status === "paid" && !statusUnavailable;
+  const verifying = order.status === "verifying";
+  const canSend = !statusUnavailable && order.status === "pending" && seconds > 0 && !!payment?.receivingPhone;
   const unresolved =
     order.status === "creating" || order.status === "uncertain";
   const terminal = ["cancelled", "expired", "failed", "refunded"].includes(
@@ -76,7 +88,8 @@ export function PaymentCheckout({
     creating: "Getting your payment ready.",
     uncertain: "Let’s check before you pay.",
     pending: partial ? "A little more to go." : "One last little step.",
-    paid: "You have great taste.",
+    paid: payment?.isDemo ? "Test payment confirmed." : "You have great taste.",
+    verifying: "We’re confirming your transfer.",
     cancelled: "Your payment was cancelled.",
     expired: "The payment window has ended.",
     failed: "This payment didn’t complete.",
@@ -89,7 +102,7 @@ export function PaymentCheckout({
       </Link>
       <span className="eyebrow">
         {paid
-          ? "PAYMENT CONFIRMED BY AIRBENDA"
+          ? payment?.isDemo ? "TEST PAYMENT CONFIRMED" : "PAYMENT CONFIRMED BY AIRBENDA"
           : "YOUR CHECKOUT IS SAVED IN THIS BROWSER"}
       </span>
       <h1>{headings[order.status]}</h1>
@@ -99,21 +112,32 @@ export function PaymentCheckout({
       </p>
       <div className="payment-grid">
         <section className="payment-panel">
-          {paid ? (
+          {statusUnavailable ? (
+            <div className="demo-notice">
+              <Icon name="bag" />
+              <p><strong>Check the latest payment status</strong>Keep this checkout open while Airbenda’s payment status is unavailable.</p>
+            </div>
+          ) : paid ? (
             <div className="payment-success">
               <div className="success-icon">
                 <Icon name="check" width="30" height="30" />
               </div>
-              <h2>Payment received.</h2>
+              <h2>{payment?.isDemo ? "Simulated payment received." : "Payment received."}</h2>
               <p>
                 Airbenda has confirmed your payment of{" "}
                 {formatKobo(payment!.receivedKobo)}. Your order is saved with
                 the reference above.
               </p>
-              <p className="muted">
-                Order confirmation does not send an email or arrange shipping
-                automatically.
-              </p>
+              {payment?.isDemo ? (
+                <p className="muted">No real airtime or money moved for this order.</p>
+              ) : payment?.receiptEmail && (
+                <p className="muted">Airbenda will send your receipt to {payment.receiptEmail}.</p>
+              )}
+              {payment?.receiptUrl && (
+                <a className="button secondary" href={payment.receiptUrl} target="_blank" rel="noopener noreferrer">
+                  View or download receipt
+                </a>
+              )}
             </div>
           ) : unresolved ? (
             <div className="demo-notice">
@@ -150,15 +174,21 @@ export function PaymentCheckout({
               <>
                 <div className="payment-status">
                   <span className="status-dot" />
-                  {partial ? "Part payment received" : "Awaiting your airtime"}
+                  {verifying ? "Confirming with the carrier" : partial ? "Part payment received" : "Awaiting your airtime"}
                   <span>
-                    {seconds > 0
+                    {verifying ? "Still checking" : seconds > 0
                       ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} remaining`
                       : "Window ended — checking status"}
                   </span>
                 </div>
-                {seconds > 0 && payment.receivingPhone ? (
+                {canSend ? (
                   <>
+                    {payment.isDemo && <p className="payment-notice">Test payment. Do not send real airtime.</p>}
+                    {partial && (
+                      <p className="payment-notice" role="status">
+                        Airbenda received {formatKobo(payment.receivedKobo)}. The remaining balance is {formatKobo(payment.remainingKobo)}.
+                      </p>
+                    )}
                     <span className="eyebrow">
                       {partial
                         ? "REMAINING AIRTIME TO SEND"
@@ -166,6 +196,15 @@ export function PaymentCheckout({
                     </span>
                     <div className="airtime-total">
                       {formatKobo(payment.remainingKobo)}
+                      <button className="text-button" type="button" onClick={async () => {
+                        try {
+                          const amount = payment.remainingKobo / 100;
+                          await navigator.clipboard.writeText(String(amount));
+                          setNotice("Transfer amount copied.");
+                        } catch {
+                          setNotice("Copy is unavailable. Use the amount shown above.");
+                        }
+                      }}>Copy amount</button>
                     </div>
                     <div className="receiving-number">
                       <span>{payment.network} receiving number</span>
@@ -205,7 +244,7 @@ export function PaymentCheckout({
                           Send the exact amount so Airbenda can match your
                           payment.
                         </p>
-                        {!partial && payment.ussd && (
+                        {payment.ussd && (
                           <div className="ussd-code">
                             <span>USSD transfer guide</span>
                             <code>{payment.ussd}</code>
@@ -217,28 +256,37 @@ export function PaymentCheckout({
                         )}
                       </>
                     )}
-                    <button
-                      type="button"
-                      className="button primary full-width"
-                      disabled={!!busy}
-                      onClick={() => action("report-paid")}
-                    >
-                      {busy === "report-paid"
-                        ? "Reporting transfer…"
-                        : "I’ve sent the airtime"}
-                      <Icon name="arrow" />
-                    </button>
                   </>
                 ) : (
                   <div className="demo-notice">
                     <Icon name="bag" />
                     <p>
-                      <strong>Check payment status before continuing</strong>
-                      {!payment.receivingPhone
+                      <strong>{verifying ? "Airbenda is still looking for your transfer" : "Check payment status before continuing"}</strong>
+                      {verifying
+                        ? "Carrier confirmation can take a few minutes. If you already paid, enter the sender number below to help Airbenda find the transfer."
+                        : !payment.receivingPhone
                         ? "Airbenda hasn’t supplied a receiving number. Don’t send airtime until verified instructions are available."
                         : "The displayed transfer window has ended. Don’t send more airtime using these instructions; check the latest status or contact the shop."}
                     </p>
                   </div>
+                )}
+                {(verifying || canSend) && (
+                  <>
+                    {verifying && (
+                      <label className="form-fields payment-sender">
+                        Sender phone number (optional)
+                        <input type="tel" autoComplete="tel" placeholder="0801 234 5678"
+                          value={senderPhone} maxLength={24} disabled={!!busy}
+                          onChange={(event) => setSenderPhone(event.target.value)} />
+                      </label>
+                    )}
+                    <button type="button" className="button primary full-width" disabled={!!busy}
+                      onClick={() => action("report-paid")}>
+                      {busy === "report-paid" ? "Checking transfer…" : verifying ? "Check my payment now"
+                        : partial ? "I’ve transferred the balance" : "I’ve sent the airtime"}
+                      <Icon name="arrow" />
+                    </button>
+                  </>
                 )}
                 <p className="summary-footnote">
                   Reporting a transfer does not confirm payment. Airbenda
@@ -268,7 +316,7 @@ export function PaymentCheckout({
                 {busy === "refresh" ? "Checking…" : "Check payment status"}
               </button>
             )}
-            {order.status === "pending" && !partial && (
+            {!statusUnavailable && order.status === "pending" && seconds > 0 && !partial && (
               <button
                 type="button"
                 className="text-button"
@@ -278,7 +326,7 @@ export function PaymentCheckout({
                 {busy === "cancel" ? "Cancelling…" : "Cancel payment"}
               </button>
             )}
-            {(paid || (terminal && !partial)) && (
+            {(!statusUnavailable && (paid || (terminal && !partial))) && (
               <button
                 type="button"
                 className="button primary"
@@ -350,10 +398,12 @@ export function PaymentCheckout({
                 <span>Airbenda service charge</span>
                 <span>{formatKobo(payment.serviceKobo)}</span>
               </div>
-              <div className="summary-row">
-                <span>Payment matching amount</span>
-                <span>{formatKobo(payment.suffixKobo)}</span>
-              </div>
+              {payment.suffixKobo > 0 && (
+                <div className="summary-row">
+                  <span>Network verification tag</span>
+                  <span>{formatKobo(payment.suffixKobo)}</span>
+                </div>
+              )}
               <div className="summary-row total">
                 <span>Total airtime</span>
                 <strong>{formatKobo(payment.totalKobo)}</strong>

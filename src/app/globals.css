@@ -2151,3 +2151,14 @@ em {
     overflow-wrap: anywhere;
   }
 }
+
+.payment-sender {
+  display: grid;
+  gap: 8px;
+  margin-block: 18px;
+}
+.airtime-total > .text-button {
+  display: block;
+  margin-top: 8px;
+  letter-spacing: normal;
+}

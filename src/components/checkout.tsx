@@ -15,8 +15,11 @@ export function Checkout() {
   const [loaded, setLoaded] = useState(false);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [acting, setActing] = useState(false);
+  const [statusUnavailable, setStatusUnavailable] = useState(false);
   const [error, setError] = useState("");
   const locked = useRef(false);
+  const activePoll = useRef<AbortController | null>(null);
   async function loadCheckout(signal?: AbortSignal) {
     const response = await fetch("/api/checkout", {
       cache: "no-store",
@@ -27,9 +30,11 @@ export function Checkout() {
       throw new Error(
         data.error || "We couldn’t load checkout. Please try again.",
       );
+    if (signal?.aborted) return;
     setOrder(data.order);
     setConfigured(data.configured);
     setError(data.warning || "");
+    setStatusUnavailable(!!data.warning);
     setLoaded(true);
   }
   useEffect(() => {
@@ -43,30 +48,35 @@ export function Checkout() {
     return () => controller.abort();
   }, []);
   useEffect(() => {
-    if (order?.status === "paid") completeOrder(order);
-  }, [order, completeOrder]);
+    if (order?.status === "paid" && !statusUnavailable) completeOrder(order);
+  }, [order, completeOrder, statusUnavailable]);
   useEffect(() => {
-    if (!order || !["creating", "pending"].includes(order.status)) return;
+    if (acting || submitting || !order || !["creating", "pending", "verifying"].includes(order.status)) return;
+    const interval = order.status === "verifying" ? 6500 : 4000;
     const controller = new AbortController();
+    activePoll.current = controller;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
         await loadCheckout(controller.signal);
       } catch {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
+          setStatusUnavailable(true);
           setError(
             "We couldn’t update payment status. Your order is saved; please check again.",
           );
+        }
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(poll, 5000);
+        if (!controller.signal.aborted) timer = setTimeout(poll, interval);
       }
     }
-    timer = setTimeout(poll, 5000);
+    timer = setTimeout(poll, interval);
     return () => {
       controller.abort();
       clearTimeout(timer);
+      if (activePoll.current === controller) activePoll.current = null;
     };
-  }, [order?.id, order?.status]);
+  }, [order?.id, order?.status, acting, submitting]);
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (locked.current) return;
@@ -100,6 +110,8 @@ export function Checkout() {
             existing.error || "We couldn’t load checkout. Please try again.",
           );
         if (existing.order) {
+          setStatusUnavailable(!!existing.warning);
+          setError(existing.warning || "");
           setOrder(existing.order);
           return;
         }
@@ -154,10 +166,19 @@ export function Checkout() {
   if (order)
     return (
       <PaymentCheckout
+        key={order.id}
         order={order}
+        onActing={(pending) => {
+          if (pending) activePoll.current?.abort();
+          setActing(pending);
+        }}
         error={error}
         onError={setError}
-        onOrder={setOrder}
+        statusUnavailable={statusUnavailable}
+        onOrder={(updated) => {
+          setStatusUnavailable(false);
+          setOrder(updated);
+        }}
       />
     );
   if (cart.length === 0)

@@ -35,7 +35,7 @@ Production domain: `https://formalabs.vercel.app`.
 
 The redirect routes reopen the saved browser checkout and check payment status. Visiting a success URL cannot mark an order paid.
 
-The webhook route verifies the HMAC-SHA256 signature over the raw body and acknowledges valid notifications. It does not keep a separate event/order store or trigger fulfillment. Browser polling and explicit status refresh read the authoritative transaction from Airbenda, including after returning to checkout. No Merchant settings are changed automatically.
+The webhook route verifies the HMAC-SHA256 signature over the raw body and acknowledges valid notifications. It does not keep a separate event/order store or trigger fulfillment. Browser polling and explicit status refresh read the authoritative transaction from Airbenda, including after returning to checkout. During the gateway grace window the shop keeps checking for late transfers and lets the payer provide a sender number. Partial payments use the gateway’s exact remaining balance. Confirmed orders show the official receipt when the gateway supplies one. No Merchant settings are changed automatically.
 
 ## Scope
 

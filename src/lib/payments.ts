@@ -12,6 +12,7 @@ export type OrderStatus =
   | "creating"
   | "uncertain"
   | "pending"
+  | "verifying"
   | "paid"
   | "failed"
   | "expired"
@@ -51,6 +52,10 @@ export type Payment = {
   remainingKobo: number;
   expiresAt: string;
   serverTime: string;
+  graceExpiresAt?: string | null;
+  isDemo?: boolean;
+  receiptUrl?: string | null;
+  receiptEmail?: string | null;
 };
 export type PublicOrder = {
   id: string;
@@ -144,10 +149,39 @@ function timestamp(value: unknown): string {
     throw new Error("Invalid payment expiry.");
   return new Date(normalized).toISOString();
 }
+function transferCode(
+  network: PaymentNetwork, phone: string, amountKobo: number, codes: unknown[],
+): string | null {
+  if (!phone || amountKobo <= 0 || amountKobo % 100 !== 0) return null;
+  const amount = amountKobo / 100;
+  const templates = {
+    MTN: `*321*1*${phone}*${amount}*PIN#`,
+    Airtel: `*432*1*${phone}*${amount}*PIN#`,
+    "9Mobile": `*223*PIN*${amount}*${phone}#`,
+    "T2 Mobile": `*321*1*${phone}*${amount}*PIN#`,
+  };
+  return codes.some((code) => code === templates[network]) ? templates[network] : null;
+}
+
+function checkoutReceiptUrl(raw: unknown, origin: string | undefined, id: string, demo: boolean): string | null {
+  if (typeof raw !== "string" || !origin) return null;
+  try {
+    const url = new URL(raw);
+    if (url.origin !== origin || url.username || url.password ||
+        ![`/api/checkout/${id}/receipt`, `/api/checkout/${id}/receipt.png`, `/api/checkout/${id}/receipt.html`].includes(url.pathname)) return null;
+    url.search = demo ? "?demo=true" : "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 export function parseGatewayPayment(
   value: unknown,
   order: Pick<OrderInput, "totalKobo" | "network" | "channel">,
   expectedId?: string,
+  gatewayOrigin?: string,
 ): Payment {
   if (!value || typeof value !== "object")
     throw new Error("Invalid payment response.");
@@ -191,15 +225,16 @@ export function parseGatewayPayment(
       : "";
   if (receivingPhone && !/^(?:0|234|\+234)\d{10}$/.test(receivingPhone))
     throw new Error("Invalid receiving number.");
-  const ussd =
-    typeof body.ussd_code === "string" &&
-    /^[*#0-9A-Za-z ]{1,100}$/.test(body.ussd_code)
-      ? body.ussd_code
-      : null;
+  const ussd = order.channel === "DIRECT_AIRTIME"
+    ? transferCode(order.network, receivingPhone, remainingKobo,
+        receivedKobo > 0 ? [body.topup_ussd_code, body.ussd_code] : [body.ussd_code])
+    : null;
   if (typeof body.status !== "string")
     throw new Error("Missing payment status.");
   const status = body.status.toLowerCase();
-  if (["success", "completed"].includes(status) && receivedKobo < totalKobo)
+  const paid = ["success", "completed"].includes(status);
+  const isDemo = body.is_demo === true;
+  if (paid && receivedKobo < totalKobo)
     throw new Error("Payment has not been fully received.");
   return {
     id: body.id,
@@ -221,13 +256,22 @@ export function parseGatewayPayment(
     remainingKobo,
     expiresAt: timestamp(body.expires_at),
     serverTime: timestamp(body.server_time),
+    graceExpiresAt: body.grace_expires_at == null ? null : timestamp(body.grace_expires_at),
+    isDemo,
+    receiptUrl: paid ? checkoutReceiptUrl(body.receipt_url, gatewayOrigin, body.id, isDemo) : null,
+    receiptEmail: paid && typeof body.customer_email === "string" &&
+      body.customer_email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.customer_email)
+      ? body.customer_email : null,
   };
 }
 export function paymentOrderStatus(payment: Payment): OrderStatus {
   if (["success", "completed"].includes(payment.status)) return "paid";
-  if (["failed", "expired", "cancelled", "refunded"].includes(payment.status))
-    return payment.status as OrderStatus;
-  return "pending";
+  if (payment.status === "failed" || payment.status === "cancelled" || payment.status === "refunded")
+    return payment.status;
+  const now = Date.parse(payment.serverTime);
+  if (payment.status !== "expired" && now < Date.parse(payment.expiresAt)) return "pending";
+  if (payment.graceExpiresAt && now < Date.parse(payment.graceExpiresAt)) return "verifying";
+  return "expired";
 }
 export const formatKobo = (amount: number) =>
   new Intl.NumberFormat("en-NG", {

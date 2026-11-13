@@ -92,7 +92,10 @@ export async function initializePayment(input: OrderInput) {
     payment_type: "one_time",
   });
   try {
-    const payment = parseGatewayPayment(value, input);
+    const config = paymentConfig();
+    const payment = parseGatewayPayment(value, input, undefined, config.base);
+    if (payment.isDemo !== config.publicKey?.startsWith("pk_test_"))
+      throw new Error("Payment mode does not match the merchant key");
     const token = (value as Record<string, unknown>).session_token;
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,512}$/.test(token))
       throw new Error("Missing payment token");

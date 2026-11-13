@@ -3,7 +3,7 @@ import {
   paymentOrderStatus,
   parseOrderInput,
 } from "../payments.ts";
-import { gatewayRequest, initializePayment, PaymentError } from "./airbenda.ts";
+import { gatewayRequest, initializePayment, paymentConfig, PaymentError } from "./airbenda.ts";
 import {
   createCheckoutRecord,
   type CheckoutRecord,
@@ -24,18 +24,27 @@ export async function refreshOrder(order: CheckoutRecord) {
     `/api/checkout/${encodeURIComponent(order.payment.id)}?${query}`,
   );
   try {
-    const payment = parseGatewayPayment(value, order, order.payment.id);
-    return {
-      ...order,
-      payment,
-      status: paymentOrderStatus(payment),
-      updatedAt: new Date().toISOString(),
-    };
+    return applyPayment(order, value);
   } catch {
     throw new PaymentError(
       "We couldn’t verify the latest payment status. Keep this checkout open and check again.",
     );
   }
+}
+
+function applyPayment(order: CheckoutRecord, value: unknown): CheckoutRecord {
+  const original = order.payment!;
+  const payment = parseGatewayPayment(value, order, original.id, paymentConfig().base);
+  if (payment.reference !== original.reference || payment.totalKobo !== original.totalKobo ||
+      payment.isDemo !== (original.isDemo ?? paymentConfig().publicKey?.startsWith("pk_test_"))) {
+    throw new Error("Payment no longer matches the saved quote");
+  }
+  return {
+    ...order,
+    payment,
+    status: paymentOrderStatus(payment),
+    updatedAt: new Date().toISOString(),
+  };
 }
 export function createOrder(
   record: CheckoutRecord | null,
@@ -99,6 +108,7 @@ export async function startPayment(
 export async function orderAction(
   record: CheckoutRecord | null,
   action: string,
+  senderPhoneInput?: unknown,
 ): Promise<CheckoutRecord | null> {
   let order = currentOrder(record);
   if (!order)
@@ -106,7 +116,7 @@ export async function orderAction(
   if (action === "new-order") {
     if (order.payment) order = await refreshOrder(order);
     if (
-      ["creating", "pending", "uncertain"].includes(order.status) ||
+      ["creating", "pending", "verifying", "uncertain"].includes(order.status) ||
       (order.payment &&
         order.payment.remainingKobo > 0 &&
         order.payment.receivedKobo > 0)
@@ -123,16 +133,30 @@ export async function orderAction(
   if (!order.payment || !order.sessionToken)
     throw new PaymentError("The payment isn’t ready for this action.", 409);
   order = await refreshOrder(order);
-  if (order.status !== "pending") return order;
+  if (action === "report-paid" && order.status !== "pending" && order.status !== "verifying") return order;
+  if (action === "cancel" && order.status !== "pending") return order;
   if (action === "cancel" && order.payment!.receivedKobo > 0)
     throw new PaymentError(
       "A part payment has arrived. Please contact the shop before cancelling.",
       409,
     );
   const query = new URLSearchParams({ session_token: order.sessionToken! });
-  await gatewayRequest(
+  let senderPhone: string | undefined;
+  if (action === "report-paid" && senderPhoneInput != null && senderPhoneInput !== "") {
+    senderPhone = typeof senderPhoneInput === "string" ? senderPhoneInput.trim().replace(/[\s-]/g, "") : "";
+    if (!/^(?:0|234|\+234)[1-9]\d{9}$/.test(senderPhone))
+      throw new PaymentError("Enter a valid Nigerian sender phone number.", 400);
+  }
+  const response = await gatewayRequest(
     `/api/checkout/${encodeURIComponent(order.payment!.id)}/${action}?${query}`,
-    {},
+    senderPhone ? { sender_phone: senderPhone } : {},
   );
+  if (action === "report-paid") {
+    try {
+      return applyPayment(order, response);
+    } catch {
+      throw new PaymentError("We couldn’t verify the payment response. Check your payment status.");
+    }
+  }
   return refreshOrder(order);
 }

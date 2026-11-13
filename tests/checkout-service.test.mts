@@ -96,7 +96,9 @@ test("initialization uses server totals and reuses a known transaction instead o
   let calls = 0;
   globalThis.fetch = async (_url, init) => {
     calls++;
-    assert.equal(JSON.parse(String(init?.body)).expected_amount_kobo, 10000);
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.expected_amount_kobo, 10000);
+    assert.equal(body.customer_email, checkoutInput.customer.email);
     return Response.json(gatewayFixture({ id: id() }));
   };
   const order = await startPayment(
@@ -193,4 +195,34 @@ test("part payments prevent cancellation and replacement checkout", async () => 
     );
   await assert.rejects(orderAction(order, "cancel"));
   await assert.rejects(orderAction(order, "new-order"));
+});
+
+test("expired checkout stays verifiable during grace and reports the corrected sender with the saved token", async () => {
+  const gatewayId = id();
+  globalThis.fetch = async () => Response.json(gatewayFixture({ id: gatewayId }));
+  const order = await startPayment(createOrder(null, checkoutInput), checkoutInput);
+  const grace = gatewayFixture({
+    id: gatewayId, status: "expired", session_token: null,
+    server_time: "2030-01-01T00:20:00Z", grace_expires_at: "2030-01-01T01:15:00Z",
+  });
+  globalThis.fetch = async (url, init) => {
+    assert.equal(new URL(String(url)).searchParams.get("session_token"), order.sessionToken);
+    if (init?.method !== "POST") return Response.json(grace);
+    assert.match(String(url), /report-paid/);
+    assert.deepEqual(JSON.parse(String(init.body)), { sender_phone: "+2348098765432" });
+    return Response.json({
+      ...grace, status: "success", received_amount_kobo: 12400, remaining_amount_kobo: 0,
+      customer_email: checkoutInput.customer.email,
+      receipt_url: `https://api.airbenda.com/api/checkout/${gatewayId}/receipt`,
+    });
+  };
+  assert.equal((await refreshOrder(order)).status, "verifying");
+  assert.equal((await orderAction(order, "cancel"))?.status, "verifying");
+  await assert.rejects(orderAction(order, "new-order"));
+  const paid = await orderAction(order, "report-paid", "+234 809 876 5432");
+  assert.equal(paid?.status, "paid");
+  assert.equal(paid?.sessionToken, order.sessionToken);
+  assert.equal(paid?.payment?.receiptUrl, `https://api.airbenda.com/api/checkout/${gatewayId}/receipt?demo=true`);
+  const reopened = openCheckoutRecord(sealCheckoutRecord(paid!, "browser", "secret"), "browser", "secret");
+  assert.equal(reopened?.payment?.receiptEmail, undefined);
 });
